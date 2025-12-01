@@ -81,16 +81,43 @@ Verbose mode with file output:
         "region": "us-west-2"
       }
     }
-  ]
+  ],
+  "variables": [
+    {
+      "name": "region",
+      "type": "string",
+      "description": "AWS region",
+      "default": "us-east-1",
+      "file": "/path/to/variables.tf"
+    }
+  ],
+  "tfvars": {
+    "terraform": {
+      "file": "/path/to/terraform.tfvars",
+      "values": {
+        "region": "us-west-2",
+        "environment": "production"
+      }
+    },
+    "dev": {
+      "file": "/path/to/dev.tfvars",
+      "values": {
+        "region": "eu-west-1",
+        "environment": "development"
+      }
+    }
+  }
 }
 ```
 
 ## Features
 
-- 🔍 **Recursive Scanning** - Automatically finds all `.tf` files in subdirectories
+- 🔍 **Recursive Scanning** - Automatically finds all `.tf` and `.tfvars` files in subdirectories
 - 📦 **Resource Extraction** - Captures all resource types, names, and attributes
 - 🔗 **Module Detection** - Identifies module calls with source information
 - ⚙️ **Provider Discovery** - Detects provider configurations and requirements
+- 📋 **Variable Declarations** - Extracts variable definitions from `.tf` files
+- 💾 **TfVars Parsing** - Reads variable values from `.tfvars` and `.tfvars.json` files
 - 📄 **JSON Output** - Structured JSON for easy processing and integration
 - 💾 **File Output** - Save results directly to a file
 - 🎨 **Flexible Formatting** - Pretty or compact JSON output

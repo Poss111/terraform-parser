@@ -15,9 +15,11 @@ import (
 
 // TerraformBreakdown represents the complete analysis of a Terraform codebase
 type TerraformBreakdown struct {
-	Resources []Resource `json:"resources"`
-	Modules   []Module   `json:"modules"`
-	Providers []Provider `json:"providers"`
+	Resources []Resource        `json:"resources"`
+	Modules   []Module          `json:"modules"`
+	Providers []Provider        `json:"providers"`
+	Variables []Variable        `json:"variables"`
+	TfVars    map[string]TfVars `json:"tfvars"`
 }
 
 // Resource represents a Terraform resource
@@ -44,6 +46,21 @@ type Provider struct {
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
+// Variable represents a Terraform variable declaration
+type Variable struct {
+	Name        string `json:"name"`
+	Type        string `json:"type,omitempty"`
+	Description string `json:"description,omitempty"`
+	Default     string `json:"default,omitempty"`
+	File        string `json:"file"`
+}
+
+// TfVars represents variable values from a .tfvars file
+type TfVars struct {
+	File   string            `json:"file"`
+	Values map[string]string `json:"values"`
+}
+
 var (
 	outputFile  string
 	prettyPrint bool
@@ -59,7 +76,9 @@ of resources, modules, and providers found in .tf files.
 The tool recursively scans the specified directory for Terraform files and extracts:
   - Resources: All resource blocks with their types, names, and attributes
   - Modules: Module calls with source information and parameters
-  - Providers: Provider configurations and requirements`,
+  - Providers: Provider configurations and requirements
+  - Variables: Variable declarations from .tf files
+  - TfVars: Variable values from .tfvars and .tfvars.json files`,
 	Example: `  # Parse a Terraform directory
   terraform-parser ./my-terraform-project
 
@@ -128,18 +147,40 @@ func parseTerraformDirectory(dirPath string) (*TerraformBreakdown, error) {
 		Resources: []Resource{},
 		Modules:   []Module{},
 		Providers: []Provider{},
+		Variables: []Variable{},
+		TfVars:    make(map[string]TfVars),
 	}
 
 	parser := hclparse.NewParser()
 
-	// Walk through the directory and find all .tf files
+	// Walk through the directory and find all .tf and .tfvars files
 	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Skip directories and non-.tf files
-		if info.IsDir() || filepath.Ext(path) != ".tf" {
+		// Skip directories
+		if info.IsDir() {
+			return nil
+		}
+
+		ext := filepath.Ext(path)
+		baseName := filepath.Base(path)
+
+		// Handle .tfvars files (both .tfvars and .tfvars.json)
+		if ext == ".tfvars" || strings.HasSuffix(baseName, ".tfvars.json") {
+			if err := parseTfVarsFile(parser, path, breakdown); err != nil {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "Warning: Error parsing %s: %v\n", path, err)
+				}
+			} else if verbose {
+				fmt.Fprintf(os.Stderr, "Parsed tfvars: %s\n", path)
+			}
+			return nil
+		}
+
+		// Handle .tf files
+		if ext != ".tf" {
 			return nil
 		}
 
@@ -156,7 +197,7 @@ func parseTerraformDirectory(dirPath string) (*TerraformBreakdown, error) {
 			fmt.Fprintf(os.Stderr, "Parsed: %s\n", path)
 		}
 
-		// Extract resources, modules, and providers from the file
+		// Extract resources, modules, providers, and variables from the file
 		extractFromFile(file.Body, path, breakdown)
 
 		return nil
@@ -176,7 +217,7 @@ func extractFromFile(body hcl.Body, filePath string, breakdown *TerraformBreakdo
 			{Type: "module", LabelNames: []string{"name"}},
 			{Type: "provider", LabelNames: []string{"name"}},
 			{Type: "terraform"},
-			{Type: "variable"},
+			{Type: "variable", LabelNames: []string{"name"}},
 			{Type: "output"},
 			{Type: "data", LabelNames: []string{"type", "name"}},
 		},
@@ -226,6 +267,25 @@ func extractFromFile(body hcl.Body, filePath string, breakdown *TerraformBreakdo
 					provider.Alias = alias
 				}
 				breakdown.Providers = append(breakdown.Providers, provider)
+			}
+
+		case "variable":
+			if len(block.Labels) >= 1 {
+				variable := Variable{
+					Name: block.Labels[0],
+					File: filePath,
+				}
+				attrs := extractAttributes(block.Body)
+				if varType, ok := attrs["type"]; ok {
+					variable.Type = varType
+				}
+				if desc, ok := attrs["description"]; ok {
+					variable.Description = desc
+				}
+				if def, ok := attrs["default"]; ok {
+					variable.Default = def
+				}
+				breakdown.Variables = append(breakdown.Variables, variable)
 			}
 
 		case "terraform":
@@ -340,5 +400,53 @@ func extractRequiredProviders(body hcl.Body, filePath string, breakdown *Terrafo
 			}
 		}
 	}
+}
+
+// parseTfVarsFile parses a .tfvars or .tfvars.json file
+func parseTfVarsFile(parser *hclparse.Parser, filePath string, breakdown *TerraformBreakdown) error {
+	// Determine if it's JSON or HCL
+	var file *hcl.File
+	var diags hcl.Diagnostics
+
+	if strings.HasSuffix(filePath, ".json") {
+		file, diags = parser.ParseJSONFile(filePath)
+	} else {
+		file, diags = parser.ParseHCLFile(filePath)
+	}
+
+	if diags.HasErrors() {
+		return fmt.Errorf("parse error: %v", diags)
+	}
+
+	// Extract all attributes as variable values
+	attrs, diags := file.Body.JustAttributes()
+	if diags.HasErrors() {
+		return fmt.Errorf("attribute extraction error: %v", diags)
+	}
+
+	values := make(map[string]string)
+	for name, attr := range attrs {
+		val, valDiags := attr.Expr.Value(nil)
+		if !valDiags.HasErrors() {
+			values[name] = formatCtyValue(val)
+		}
+	}
+
+	// Use the base name without extension as the key
+	baseName := filepath.Base(filePath)
+	key := strings.TrimSuffix(baseName, filepath.Ext(baseName))
+	if strings.HasSuffix(key, ".tfvars") {
+		key = strings.TrimSuffix(key, ".tfvars")
+	}
+	if key == "" {
+		key = "terraform"
+	}
+
+	breakdown.TfVars[key] = TfVars{
+		File:   filePath,
+		Values: values,
+	}
+
+	return nil
 }
 
